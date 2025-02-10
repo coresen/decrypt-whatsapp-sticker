@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp 贴图解密 Demo</title>
+    <style>
+        #animationContainer {
+            width: 300px;
+            height: 300px;
+            border: 1px solid #ddd;
+            margin: 20px auto;
+        }
+    </style>
+</head>
+<body>
+    <h2>解密并下载 WhatsApp 贴图</h2>
+    <form id="myForm">
+        <div style="display: flex; flex-direction: column; margin-bottom: 20px;">
+            <div >
+                <label style="width: 100px; display: inline-block" for="url">下载URL：</label>
+                <input type="text" id="url" name="url" />
+            </div>
+
+            <div>
+                <label style="width: 100px; display: inline-block" for="mediaKey">mediaKey：</label>
+                <input type="text" id="mediaKey" name="mediaKey" />
+            </div>
+
+            <div>
+                <label style="width: 100px; display: inline-block" for="encFileHash">encFileHash：</label>
+                <input type="text" id="encFileHash" name="encFileHash" />
+            </div>
+
+            <div>
+                <label style="width: 100px; display: inline-block" for="mimeType">mimeType：</label>
+                <input type="text" id="mimeType" name="mimeType" />
+            </div>
+
+        </div>
+
+        <button type="submit">下载贴图</button>
+    </form>
+
+    
+    <img id="sticker" alt="WhatsApp Sticker" style="max-width: 300px; border: 1px solid #ddd; display: none;">
+    <div id="animationContainer" style="display: none;"></div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.0/umd/index.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.9.6/lottie.min.js"></script>
+    <script>
+        const mediaHMACLength = 10;  // HMAC 长度
+        const appInfo = "WhatsApp Image Keys";
+        // 📌 解密贴图并保存为 WebP 文件
+        async function decryptSticker(encUrl, mediaKey, mimeType, checksumBase64) {
+            try {
+                // 1️⃣ 下载 .enc 贴图
+                const response = await fetch(encUrl,{
+                    method: "GET",
+                    headers: {
+                        "Referer": "https://web.whatsapp.com/"
+                    }
+                });
+                const encData = new Uint8Array(await response.arrayBuffer());
+
+                // 如果数据太短，则返回错误
+                if (encData.length <= mediaHMACLength) {
+                    throw new Error("File is too short");
+                }
+
+                // 2️⃣ 分割文件数据和 HMAC 数据
+                const file = encData.slice(0, encData.length - mediaHMACLength);  // 文件数据
+                const mac = encData.slice(encData.length - mediaHMACLength);  // HMAC 数据
+ 
+                // 3️⃣ 校验 SHA256
+                const hashBuffer = await crypto.subtle.digest("SHA-256", encData);
+                const hashArray = new Uint8Array(hashBuffer);
+                const checksum = new Uint8Array(atob(checksumBase64).split("").map(c => c.charCodeAt(0)));  // 转为 Uint8Array
+                if (!compareUint8Arrays(hashArray, checksum)) {
+                    throw new Error("Invalid media file SHA256 checksum");
+                }
+
+                
+                // 4️⃣ 计算 AES-CBC 解密密钥
+                const { cipherKey, iv } = await deriveKeys(mediaKey);
+
+                // 5️⃣ 使用 AES-CBC 解密
+                const decryptedData = await decryptAESCBC(file, cipherKey, iv);
+
+                if (mimeType=="image/webp") {
+                    const blob = new Blob([decryptedData], { type: "image/webp" });
+                    const stickerUrl = URL.createObjectURL(blob);
+
+                    document.getElementById("sticker").src = stickerUrl;
+                    document.getElementById("sticker").style.display = "block";
+                    document.getElementById("animationContainer").style.display = "none";
+                } else if (mimeType=="application/was") {
+                    const unzipped = fflate.unzipSync(decryptedData);
+
+                    var G = function(a) {
+                        var b = /animation\/animation.json$/; // 只匹配 animation/animation.json
+                        var c = Object.keys(a).find(function(key) {
+                            return b.test(key);
+                        });
+                        return c != null ? a[c] : void 0; // 如果找到，返回对应的值，否则返回 undefined
+                    };
+
+                    const animationJsonUint8Array = G(unzipped);
+                    const animationJsonText = new TextDecoder("utf-8").decode(animationJsonUint8Array);
+                    const animationJson = JSON.parse(animationJsonText);
+       
+                    lottie.loadAnimation({
+                        container: document.getElementById('animationContainer'), // 动画容器
+                        renderer: 'svg', // 支持 'svg', 'canvas', 'html'
+                        loop: true, // 是否循环播放
+                        autoplay: true, // 是否自动播放
+                        animationData: animationJson // 传入 JSON 动画数据
+                    });
+                    document.getElementById("sticker").style.display = "none";
+                    document.getElementById("animationContainer").style.display = "block";
+                }
+                
+
+
+            } catch (error) {
+                console.error("Error decrypting sticker:", error);
+            }
+        }
+
+        // 比较两个 Uint8Array 是否相等
+        function compareUint8Arrays(arr1, arr2) {
+            if (arr1.length !== arr2.length) {
+                return false;
+            }
+            for (let i = 0; i < arr1.length; i++) {
+                if (arr1[i] !== arr2[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // 用于 AES-CBC 解密
+        async function decryptAESCBC(encData, cipherKey, iv) {
+            try {
+                // 使用 Web Crypto API 导入密钥
+                const cipher = await crypto.subtle.importKey(
+                    "raw", 
+                    cipherKey, 
+                    { name: "AES-CBC" },  // 使用 AES-CBC 模式
+                    false, 
+                    ["decrypt"]
+                );
+               const decrypted = await crypto.subtle.decrypt(
+                    { name: "AES-CBC", iv: iv }, 
+                    cipher, 
+                    encData
+                );
+
+                const decryptedArray = new Uint8Array(decrypted);
+
+                return decryptedArray;
+            } catch (error) {
+                console.error("Decryption failed:", error);
+            }
+        }
+
+        async function deriveKeys(mediaKeyBase64) {
+            const mediaKey = Uint8Array.from(atob(mediaKeyBase64), c => c.charCodeAt(0));
+            const salt = new TextEncoder().encode(appInfo);  // 将应用信息转为 Uint8Array
+
+            // 使用 Web Crypto API 进行 HKDF 派生
+            const hkdf = await crypto.subtle.importKey(
+                "raw", 
+                mediaKey, 
+                { name: "HKDF" }, 
+                false, 
+                ["deriveBits"]
+            );
+            
+            // 派生 112 字节（根据 Go 的实现）
+            const derivedBits = await crypto.subtle.deriveBits(
+                { name: "HKDF", hash: "SHA-256", salt: new Uint8Array([]), info: salt }, 
+                hkdf, 
+                112 * 8  // 112 字节 * 8 位 = 896 位
+            );
+            
+            const derivedKey = new Uint8Array(derivedBits);
+            const iv = derivedKey.slice(0, 16);
+            const cipherKey = derivedKey.slice(16, 48);
+
+            return { iv, cipherKey };
+        }
+
+
+        document.getElementById("myForm").addEventListener("submit", async function(event) {
+            event.preventDefault(); // 阻止默认提交
+
+            const formData = new FormData(this); // 获取表单数据
+            mimeType = formData.get("mimeType")
+            const encUrl = formData.get("url")
+            const mediaKey = formData.get("mediaKey")
+            checksumBase64 = formData.get("encFileHash")
+
+            decryptSticker(encUrl, mediaKey, mimeType, checksumBase64)
+        });
+
+    </script>
+</body>
+</html>
